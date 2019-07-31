@@ -97,7 +97,7 @@ class CANMessage(object):
     dbc_info = {}
 
     def __init__(self, mid, data=None, rtr=False, name='', dlc=None):
-
+        
         if mid > 0x1fffffff:
             mid = 0x1fffffff
 
@@ -216,6 +216,24 @@ class CANMessage(object):
                                         'max_value': max_value,
                                         'unit': unit}
 
+
+        pattern = r'(?P<sig_valtype>^SIG_VALTYPE_ .+)'
+
+        for match in re.finditer(pattern, string, flags=re.M):
+            msg = match.group('sig_valtype')
+
+            pattern = r'SIG_VALTYPE_ (?P<can_id>\d+) (?P<name>[^ ]+) : (?P<sig_valtype>\d)'
+            match = re.search(pattern, msg)
+            can_id = int(match.group('can_id'))
+            signal_name = match.group('name')
+            sig_valtype = int(match.group('sig_valtype'))
+
+            messages[can_id]['signals'][signal_name]['sig_valtype'] = sig_valtype
+
+            size = messages[can_id]['signals'][signal_name]['size']
+            if sig_valtype == 1 and not size == 32 or sig_valtype == 2 and not size == 64:
+                raise USBtinException('CAN_ID {} Incompatible SIG_VALTYPE {} and SIGNAL_SIZE {}.'.format(hex(can_id), sig_valtype, size))
+
         CANMessage.dbc_info.update(messages)
 
     def __setattr__(self, name, value):
@@ -230,7 +248,18 @@ class CANMessage(object):
                     size = sig['size']
                     bit_offset = sig['start_bit']
 
-                    value = int(value / sig['factor'] + sig['offset'])
+                    if 'sig_valtype' in sig:
+                        value = (value / sig['factor'] + sig['offset'])
+                        if sig['sig_valtype'] == 1:
+                            s = pack('>f', value)
+                            value = unpack('>l', s)[0]
+                        elif sig['sig_valtype'] == 2:
+                            s = pack('>d', value)
+                            value = unpack('>l', s)[0]
+                        else:
+                            raise USBtinException('CAN ID {} SIG_VALTYPE invalid: dbc says {} but only 1 and 2 are supported'.format(hex(self.mid), sig['sig_valtype']))
+                    else:
+                        value = int((value / sig['factor'] + sig['offset']))
 
                     mask = (2**size - 1) << bit_offset
 
@@ -260,14 +289,21 @@ class CANMessage(object):
                     mask = (2**size - 1) << bit_offset
                     value = (self._data & mask) >> bit_offset
 
-                    if sig['signed']:
-                        if value & (2**(size-1)):
-                            value -= 2**size
-
-                    if (factor, offset) == (1, 0):
-                        return value
+                    if 'sig_valtype' in sig:
+                        if sig['sig_valtype'] == 1:
+                            s = pack('>l', value)
+                            value = unpack('>f', s)[0]
+                        elif sig['sig_valtype'] == 2:
+                            s = pack('>l', value)
+                            value = unpack('>d', s)[0]
+                        else:
+                            raise USBtinException('CAN ID {} SIG_VALTYPE invalid: dbc says {} but only 1 and 2 are supported'.format(hex(self.mid), sig['sig_valtype']))
                     else:
-                        return (value - offset) * factor
+                        if sig['signed']:
+                            if value & (2**(size-1)):
+                                value -= 2**size
+
+                    return (value - offset) * factor
 
                 else:
                     return super(CANMessage, self).__getattribute__(name)
